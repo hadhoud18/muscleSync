@@ -45,7 +45,7 @@ const DB = {
   blankUserData(){
     return {
       onboarded: false,
-      profile: { name:"", age:null, gender:"other", height_cm:null, weight_kg:null, targetWeight_kg:null, bodyFat:null, experience:"beginner" },
+      profile: { name:"", age:null, gender:"other", height_cm:null, weight_kg:null, startWeight_kg:null, targetWeight_kg:null, bodyFat:null, experience:"beginner" },
       goal: { type:"recomp", rateKgPerWeek:0.35, priority:"balanced" },
       gym: { hasGym:false, name:"", equipment:[], preferredDays:[], maxDuration:60, preferredTime:"evening", homeEquipment:[] },
       foods: { likes:{ protein:[], carbs:[], veg:[], fruit:[] }, custom:[], dislikes:[], restrictions:[] },
@@ -329,6 +329,7 @@ function onbBack(){
 }
 function finishOnboarding(){
   App.onbDraft.onboarded = true;
+  if(!App.onbDraft.profile.startWeight_kg) App.onbDraft.profile.startWeight_kg = App.onbDraft.profile.weight_kg;
   // seed current week schedule from defaults if empty
   const wk = weekKeyFor(0);
   if(!App.onbDraft.weeks[wk]) App.onbDraft.weeks[wk] = defaultWeekSchedule(App.onbDraft);
@@ -1024,8 +1025,26 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
   events.push({time:minToTime(wakeM), type:"wake", title:"Wake up", why:""});
   events.push({time:minToTime(wakeM+10), type:"water", title:"Water — 500ml", why:"Rehydrating first thing supports metabolism and alertness."});
 
+  // Early morning cardio — only on working days that start after 10:00 AM and
+  // are not an evening shift. This is separate from the main gym/home workout,
+  // which is never placed in the morning on a working day.
+  const workStartMin = working ? timeToMin(dayCfg.workStart) : null;
+  const isEveningShift = working && workStartMin >= 840; // shift starts at/after 14:00 (2 PM) — treated as an evening shift
+  const lateMorningStart = working && !familyDay && workStartMin > 600 && !isEveningShift; // starts after 10:00, but not an evening shift
+  let morningCardio = null;
+  if(lateMorningStart){
+    const cardioStart = wakeM + 15;
+    const latestCardioEnd = workStartMin - (dayCfg.commuteMin||0) - 45; // leave room for breakfast + getting ready
+    const available = latestCardioEnd - cardioStart;
+    if(available >= 15){
+      const cardioDur = clampNum(available, 15, 30);
+      events.push({time:minToTime(cardioStart), type:"cardio", title:"Early morning cardio — brisk walk or light jog", why:"Your shift starts later today, so a light cardio session opens the day without cutting into your main workout after work.", duration:cardioDur});
+      morningCardio = {start:cardioStart, end:cardioStart+cardioDur};
+    }
+  }
+
   // breakfast
-  let breakfastM = wakeM+30;
+  let breakfastM = morningCardio ? morningCardio.end + 10 : wakeM+30;
   if(working && breakfastM > timeToMin(dayCfg.workStart)-dayCfg.commuteMin-10){
     breakfastM = Math.max(wakeM+15, timeToMin(dayCfg.workStart)-dayCfg.commuteMin-40);
   }
@@ -1101,7 +1120,7 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
   const meals = buildMealsForDay(events, data, macros, restDay, familyDay);
   const workout = workoutWindow ? buildWorkoutForDay(dayName, data, workoutWindow[1]-workoutWindow[0]) : null;
 
-  return { events, meals, workout, macros, restDay: !workoutWindow, familyDay, workoutWindow };
+  return { events, meals, workout, macros, restDay: !workoutWindow, familyDay, workoutWindow, morningCardio };
 }
 
 function workoutSplitLabel(dayName, data){
@@ -1424,7 +1443,7 @@ function statBox(icon,value,label,pct,color){
   return `<div class="stat-box"><div class="stat-icon">${icon}</div><div class="stat-value">${value}</div><div class="stat-label">${label}</div></div>`;
 }
 function iconForEvent(ev){
-  return {wake:"⏰",water:"💧",meal:"🍽️",work:"💼",commute:"🚗",workout:"🏋️",supplement:"💊",sleep:"😴"}[ev.type] || "•";
+  return {wake:"⏰",water:"💧",meal:"🍽️",work:"💼",commute:"🚗",workout:"🏋️",cardio:"🏃",supplement:"💊",sleep:"😴"}[ev.type] || "•";
 }
 function findNextEvent(dayPlan){
   const nowM = new Date().getHours()*60 + new Date().getMinutes();
@@ -1434,7 +1453,7 @@ function findNextEvent(dayPlan){
 function renderTimeline(events){
   return `<div class="timeline">
     ${events.map(ev=>`
-      <div class="tl-item tl-${ev.type==="workout"?"workout":ev.type==="sleep"?"sleep":ev.type==="work"||ev.type==="commute"?"work":""}">
+      <div class="tl-item tl-${ev.type==="workout"?"workout":ev.type==="cardio"?"cardio":ev.type==="sleep"?"sleep":ev.type==="work"||ev.type==="commute"?"work":""}">
         <div class="tl-dot"></div>
         <div class="tl-time">${fmt12(ev.time)}</div>
         <div class="tl-title">${iconForEvent(ev)} ${esc(ev.title)}</div>
@@ -1451,6 +1470,7 @@ function checklistItemsFor(dayPlan){
     let key;
     if(ev.type==="meal") key = "meal_"+ev.mealId;
     else if(ev.type==="workout") key = "workout";
+    else if(ev.type==="cardio") key = "cardio";
     else if(ev.type==="supplement") key = "supp_"+(ev.id||i);
     else if(ev.type==="wake") key = "wake";
     else if(ev.type==="water") key = "water";
@@ -1563,6 +1583,11 @@ function renderWorkout(){
         </div>`;
       }).join("")}
     </div>
+    ${dp.morningCardio ? `
+      <div class="card">
+        <div class="card-title-row"><h3>Early morning cardio</h3><span class="tag accent">${dp.morningCardio.end-dp.morningCardio.start} min</span></div>
+        <p class="muted" style="font-size:13.5px; line-height:1.6;">Your shift starts later today, so a light brisk walk or jog is scheduled right after you wake up, at ${fmt12(minToTime(dp.morningCardio.start))} — separate from your main workout, which still happens after work.</p>
+      </div>` : ""}
     ${dp.familyDay ? `
       <div class="card">
         <div class="card-title-row"><h3>Family day</h3><span class="tag accent">Diet break</span></div>
@@ -1761,6 +1786,65 @@ function renderMealPrep(plan){
 /* ==========================================================================
    RENDER: PROGRESS
    ========================================================================== */
+function getWeekWeighIn(weekKey){
+  return (App.data.progress||[]).find(e=>e.weekKey===weekKey) || null;
+}
+function goalProgress(){
+  const p = App.data.profile;
+  const start = p.startWeight_kg || p.weight_kg;
+  const target = p.targetWeight_kg;
+  const current = p.weight_kg;
+  const totalDelta = target - start;
+  if(Math.abs(totalDelta) < 0.1) return { pct:100, remaining:0, direction:"maintain", start, target, current };
+  const doneDelta = current - start;
+  const pct = clampNum(Math.round((doneDelta/totalDelta)*100), 0, 100);
+  const remaining = round(Math.abs(target-current),1);
+  const direction = totalDelta < 0 ? "lose" : "gain";
+  return { pct, remaining, direction, start, target, current };
+}
+function renderWeeklyWeighInCard(){
+  const wk = currentWeekKey();
+  const entry = getWeekWeighIn(wk);
+  const gp = goalProgress();
+  const hasTarget = App.data.profile.targetWeight_kg && Math.abs(App.data.profile.targetWeight_kg - (App.data.profile.startWeight_kg||App.data.profile.weight_kg)) >= 0.1;
+  return `
+    <div class="card">
+      <div class="card-title-row"><h3>This week's weigh-in</h3><span class="muted" style="font-size:12px;">${weekLabel(wk)}</span></div>
+      <div class="field-row" style="align-items:flex-end;">
+        <label class="field" style="margin-bottom:0;"><span>Weight (kg)</span><input id="weeklyWeighInput" type="number" step="0.1" min="30" max="300" value="${entry?entry.weight:(App.data.profile.weight_kg||"")}"></label>
+        <button class="btn btn-primary" id="weeklyWeighSaveBtn" style="margin-bottom:14px;">${entry?"Update":"Save"}</button>
+      </div>
+      ${hasTarget ? `
+        <div class="stat-box" style="padding:0; background:transparent; border:none; margin-top:2px;">
+          <div class="stat-bar" style="height:8px;"><div class="stat-bar-fill" style="width:${gp.pct}%; background:var(--accent);"></div></div>
+        </div>
+        <p class="muted" style="font-size:13px; margin-top:10px;">
+          ${gp.remaining<=0 ? `Goal weight reached — nice work.` : `${gp.remaining} kg left to ${gp.direction} to reach your ${gp.target} kg goal (${gp.pct}% there).`}
+        </p>
+      ` : `<p class="muted" style="font-size:12.5px;">Set a target weight in your Profile to see goal progress here.</p>`}
+      <p class="faint" style="font-size:11.5px; margin-top:8px;">Saving updates your current weight, adjusts how close you are to your goal, and recalculates your calorie and macro targets.</p>
+    </div>`;
+}
+function bindWeeklyWeighInCard(){
+  const btn = document.getElementById("weeklyWeighSaveBtn");
+  if(!btn) return;
+  btn.addEventListener("click", ()=>{
+    const weight = +document.getElementById("weeklyWeighInput").value;
+    if(!weight || weight<30 || weight>300){ toast("Enter a realistic weight.","error"); return; }
+    const wk = currentWeekKey();
+    const existing = getWeekWeighIn(wk);
+    if(existing){
+      existing.weight = weight; existing.date = new Date().toISOString();
+    } else {
+      App.data.progress.push({date:new Date().toISOString(), weekKey:wk, weight});
+    }
+    if(!App.data.profile.startWeight_kg) App.data.profile.startWeight_kg = App.data.profile.weight_kg || weight;
+    App.data.profile.weight_kg = weight;
+    App.save();
+    toast("Weigh-in saved. Recalculating your plan…", "success");
+    generateWeeklyPlan(wk, ()=> renderProgress());
+  });
+}
 function renderProgress(){
   const host = document.getElementById("progressContent");
   const log = App.data.progress || [];
@@ -1770,8 +1854,10 @@ function renderProgress(){
   const change = latest && first ? round(latest.weight-first.weight,1) : null;
 
   host.innerHTML = `
+    ${renderWeeklyWeighInCard()}
+
     <div class="card">
-      <div class="card-title-row"><h3>Weight trend</h3><button class="btn btn-primary btn-sm" id="addWeightBtn">+ Log weight</button></div>
+      <div class="card-title-row"><h3>Weight trend</h3><button class="btn btn-ghost btn-sm" id="addWeightBtn">+ Log a one-off entry</button></div>
       ${sorted.length ? `<div class="chart-wrap" id="weightChart"></div>` : `<p class="muted" style="font-size:13.5px;">No entries yet. Log your first weight to start tracking.</p>`}
       ${sorted.length>=2 ? `<p class="muted" style="font-size:13px; margin-top:10px;">${change<=0?"Down":"Up"} ${Math.abs(change)} kg since your first log (${sorted.length} entries).</p>`:""}
     </div>
@@ -1779,7 +1865,7 @@ function renderProgress(){
     <div class="card">
       <div class="card-title-row"><h3>Log history</h3></div>
       ${sorted.length ? sorted.slice().reverse().map(e=>`
-        <div class="list-row"><div class="list-row-label">${new Date(e.date).toLocaleDateString(undefined,{month:"short",day:"numeric"})}</div>
+        <div class="list-row"><div class="list-row-label">${new Date(e.date).toLocaleDateString(undefined,{month:"short",day:"numeric"})}${e.weekKey?` <span class="tag" style="margin-left:6px;">weekly</span>`:""}</div>
         <div class="list-row-value">${e.weight} kg${e.waist?" · waist "+e.waist+"cm":""}${e.bodyFat?" · "+e.bodyFat+"% BF":""}</div></div>`).join("")
       : `<p class="muted" style="font-size:13.5px;">Nothing logged yet.</p>`}
     </div>
@@ -1787,6 +1873,7 @@ function renderProgress(){
     ${renderWeeklyReview()}
     ${renderConsistencyCard()}
   `;
+  bindWeeklyWeighInCard();
   document.getElementById("addWeightBtn").addEventListener("click", openLogWeightModal);
   if(sorted.length) drawWeightChart(sorted);
   const trackedWeeks = trackedWeekKeys(8).map(wk=>weekAdherenceStats(wk)).filter(Boolean);
@@ -2151,7 +2238,7 @@ function renderAdmin(){
 function buildDemoProfile(){
   const d = DB.blankUserData();
   d.onboarded = true;
-  d.profile = { name:"Alex Rivera", age:29, gender:"male", height_cm:178, weight_kg:84, targetWeight_kg:78, bodyFat:22, experience:"intermediate" };
+  d.profile = { name:"Alex Rivera", age:29, gender:"male", height_cm:178, weight_kg:84, startWeight_kg:87, targetWeight_kg:78, bodyFat:22, experience:"intermediate" };
   d.goal = { type:"recomp", rateKgPerWeek:0.35, priority:"balanced" };
   d.gym = { hasGym:true, name:"Iron Temple Fitness", equipment:["Barbell","Dumbbells","Bench","Squat rack","Cable machine","Lat pulldown"], preferredDays:["Monday","Tuesday","Thursday","Friday"], maxDuration:60, preferredTime:"evening", homeEquipment:[] };
   d.foods.likes = { protein:["Chicken","Eggs","Greek yogurt","Tuna"], carbs:["Rice","Oats","Potatoes","Bread"], veg:["Broccoli","Spinach","Tomato","Carrots"], fruit:["Banana","Berries","Apple"] };

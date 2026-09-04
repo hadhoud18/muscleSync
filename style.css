@@ -281,10 +281,12 @@ a{color:inherit;}
 }
 .tl-item.tl-work .tl-dot{border-color:var(--carbs);}
 .tl-item.tl-workout .tl-dot{border-color:var(--fat);}
+.tl-item.tl-cardio .tl-dot{border-color:var(--water);}
 .tl-item.tl-sleep .tl-dot{border-color:var(--text-faint);}
 .tl-time{font-size:12px; font-weight:800; color:var(--accent); letter-spacing:.3px;}
 .tl-item.tl-work .tl-time{color:var(--carbs);}
 .tl-item.tl-workout .tl-time{color:var(--fat);}
+.tl-item.tl-cardio .tl-time{color:var(--water);}
 .tl-item.tl-sleep .tl-time{color:var(--text-faint);}
 .tl-title{font-size:14.5px; font-weight:700; margin-top:2px;}
 .tl-why{font-size:12.5px; color:var(--text-dim); margin-top:4px; line-height:1.45;}
