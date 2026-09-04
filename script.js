@@ -346,6 +346,7 @@ function defaultWeekSchedule(data){
     const weekend = d==="Saturday" || d==="Sunday";
     days[d] = {
       off: weekend,
+      familyDay: false,
       workStart: weekend ? "" : "09:00",
       workEnd: weekend ? "" : "17:00",
       commuteMin: weekend ? 0 : 20,
@@ -769,6 +770,7 @@ function renderWeekEditorInto(host, weekObj, compact){
         <h4>${day}</h4>
         <label class="day-off-toggle"><input type="checkbox" data-role="off" ${c.off?"checked":""}> Day off</label>
       </div>
+      <label class="day-off-toggle family-toggle"><input type="checkbox" data-role="familyDay" ${c.familyDay?"checked":""}> 👨‍👩‍👧 Family day — moderate diet break, no workout</label>
       <div class="day-fields" style="${c.off?"display:none;":""}">
         <div class="field-row">
           <label class="field"><span>Work start</span><input type="time" data-role="workStart" value="${c.workStart||""}"></label>
@@ -805,9 +807,11 @@ function collectWeekEditor(weekObj){
   document.querySelectorAll(".day-editor").forEach(ed=>{
     const day = ed.dataset.day;
     const off = ed.querySelector('[data-role="off"]').checked;
+    const familyDay = ed.querySelector('[data-role="familyDay"]').checked;
     if(off){
       weekObj.days[day] = {
         off:true,
+        familyDay,
         workStart:"", workEnd:"", commuteMin:0,
         wake: ed.querySelector('[data-role="wakeOff"]').value || weekObj.days[day].wake,
         sleep: ed.querySelector('[data-role="sleepOff"]').value || weekObj.days[day].sleep
@@ -815,6 +819,7 @@ function collectWeekEditor(weekObj){
     } else {
       weekObj.days[day] = {
         off:false,
+        familyDay,
         workStart: ed.querySelector('[data-role="workStart"]').value,
         workEnd: ed.querySelector('[data-role="workEnd"]').value,
         commuteMin: +ed.querySelector('[data-role="commuteMin"]').value || 0,
@@ -973,11 +978,13 @@ function computeFreeWindows(wake, sleep, workStart, workEnd, commuteMin){
   return windows.filter(([s,e])=> e-s >= 15);
 }
 
-function pickWorkoutWindow(windows, preferredTime, duration, sleepM){
+function pickWorkoutWindow(windows, preferredTime, duration, sleepM, minStart){
   const prefRange = { morning:[300,660], afternoon:[660,1020], evening:[1020,1380] }[preferredTime] || [1020,1380];
   // score windows by overlap with preferred range and available length, leave 40min wind-down before sleep
+  let candidates = windows;
+  if(minStart!=null) candidates = windows.filter(([s,e])=> s >= minStart);
   let best = null, bestScore = -Infinity;
-  windows.forEach(([s,e])=>{
+  candidates.forEach(([s,e])=>{
     let usableEnd = Math.min(e, sleepM-40);
     let usableStart = s;
     if(usableEnd - usableStart < Math.min(duration,20)) return;
@@ -993,6 +1000,7 @@ function pickWorkoutWindow(windows, preferredTime, duration, sleepM){
 
 function generateDayPlan(dayName, dayCfg, weekKey, data){
   const macros = calculateMacros(data);
+  const familyDay = !!dayCfg.familyDay;
   const restDay = dayCfg.off ? false : !isWorkoutDay(dayName, data);
   const wake = dayCfg.wake || data.routine.wake;
   const sleep = dayCfg.sleep || data.routine.bed;
@@ -1001,11 +1009,15 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
   const working = !dayCfg.off && dayCfg.workStart && dayCfg.workEnd;
   const windows = computeFreeWindows(wake, sleep, working?dayCfg.workStart:null, working?dayCfg.workEnd:null, dayCfg.commuteMin||0);
 
-  const workoutToday = data.gym.preferredDays.includes(dayName);
+  // Family days are a full training break — no workout is scheduled at all.
+  const workoutToday = data.gym.preferredDays.includes(dayName) && !familyDay;
   const workoutDuration = data.gym.maxDuration || 45;
   let workoutWindow = null;
   if(workoutToday){
-    workoutWindow = pickWorkoutWindow(windows, data.gym.preferredTime, workoutDuration, sleepM);
+    // On a working day, never place the workout in the morning window before work —
+    // only windows that open after work (and its commute) are considered.
+    const minStart = working ? (timeToMin(dayCfg.workEnd) + (dayCfg.commuteMin||0)) : null;
+    workoutWindow = pickWorkoutWindow(windows, data.gym.preferredTime, workoutDuration, sleepM, minStart);
   }
 
   const events = [];
@@ -1049,9 +1061,7 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
     events.push({time:minToTime(preM), type:"meal", mealId:"preworkout", title:"Pre-workout snack", why:"Quick carbs to top off energy before training."});
     let workoutWhy;
     if(!working){ workoutWhy = "Scheduled in your free window today — no work to plan around."; }
-    else if(wS >= timeToMin(dayCfg.workEnd)){ workoutWhy = `Scheduled after your commute so it never overlaps work, which ends at ${fmt12(dayCfg.workEnd)}.`; }
-    else if(wS + (wE-wS) <= timeToMin(dayCfg.workStart)-(dayCfg.commuteMin||0)){ workoutWhy = `Scheduled before work starts at ${fmt12(dayCfg.workStart)}, since your evening is taken up by work.`; }
-    else { workoutWhy = "Fit into the largest open window around your work hours today."; }
+    else { workoutWhy = `Scheduled after work and your commute (work ends at ${fmt12(dayCfg.workEnd)}) — MuscleSync never places a workout before a work shift.`; }
     events.push({time:minToTime(wS), type:"workout", title: (data.gym.hasGym?"Gym workout — "+workoutSplitLabel(dayName,data):"Home workout — "+workoutSplitLabel(dayName,data)), why:workoutWhy, duration: wE-wS});
     const postM = wE+10;
     events.push({time:minToTime(postM), type:"meal", mealId:"postworkout", title:"Post-workout nutrition", why:"Protein plus fast carbs within the anabolic window to kickstart recovery."});
@@ -1059,13 +1069,14 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
     let dinnerM = clampNum(postM+90, postM+60, sleepM-90);
     events.push({time:minToTime(dinnerM), type:"meal", mealId:"dinner", title:"Dinner", why:"Rounds out your daily protein and calorie target."});
   } else {
-    // rest day — evening snack + supplements if any, dinner around 19:30 or based on schedule
+    // rest day / family day — evening snack + supplements if any, dinner around 19:30 or based on schedule
     if(data.routine.snacksPerDay >= 2){
       const snack2M = clampNum(lunchM+240, lunchM+120, sleepM-240);
-      events.push({time:minToTime(snack2M), type:"meal", mealId:"snack2", title:"Snack", why:"Light bridge between lunch and dinner."});
+      events.push({time:minToTime(snack2M), type:"meal", mealId:"snack2", title:"Snack", why: familyDay ? "Family time — keep snacking light and mindful." : "Light bridge between lunch and dinner."});
     }
     let dinnerM = clampNum(lunchM+390, lunchM+180, sleepM-90);
-    events.push({time:minToTime(dinnerM), type:"meal", mealId:"dinner", title:"Dinner", why: restDay ? "Rest-day dinner focused on recovery and steady protein." : "Rounds out your daily protein and calorie target."});
+    let dinnerWhy = familyDay ? "Family day — enjoy dinner together with a moderate, relaxed approach to portions." : (restDay ? "Rest-day dinner focused on recovery and steady protein." : "Rounds out your daily protein and calorie target.");
+    events.push({time:minToTime(dinnerM), type:"meal", mealId:"dinner", title:"Dinner", why: dinnerWhy});
   }
 
   // supplements
@@ -1077,7 +1088,7 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
     else if(s.timing==="post-workout" && workoutWindow) sM = workoutWindow[1]+15;
     else if(s.timing==="evening") sM = sleepM-90;
     else sM = wakeM+40;
-    events.push({time:minToTime(sM), type:"supplement", title:`${s.name}${s.dose?" — "+s.dose:""}`, why:s.notes||"As part of your supplement routine."});
+    events.push({time:minToTime(sM), type:"supplement", id:s.id, title:`${s.name}${s.dose?" — "+s.dose:""}`, why:s.notes||"As part of your supplement routine."});
   });
 
   // wind-down + sleep
@@ -1087,10 +1098,10 @@ function generateDayPlan(dayName, dayCfg, weekKey, data){
   events.forEach(e=> e._m = timeToMin(e.time));
   events.sort((a,b)=>a._m-b._m);
 
-  const meals = buildMealsForDay(events, data, macros, restDay);
+  const meals = buildMealsForDay(events, data, macros, restDay, familyDay);
   const workout = workoutWindow ? buildWorkoutForDay(dayName, data, workoutWindow[1]-workoutWindow[0]) : null;
 
-  return { events, meals, workout, macros, restDay: !workoutWindow, workoutWindow };
+  return { events, meals, workout, macros, restDay: !workoutWindow, familyDay, workoutWindow };
 }
 
 function workoutSplitLabel(dayName, data){
@@ -1106,7 +1117,7 @@ function workoutSplitLabel(dayName, data){
 function macroShareForMealType(type){
   return { breakfast:0.22, lunch:0.30, dinner:0.28, snack1:0.08, snack2:0.07, preworkout:0.06, postworkout:0.12 }[type] || 0.1;
 }
-function buildMealsForDay(events, data, macros, restDay){
+function buildMealsForDay(events, data, macros, restDay, familyDay){
   const mealEvents = events.filter(e=>e.type==="meal");
   const proteinPool = likedList(data,"protein");
   const carbPool = likedList(data,"carbs");
@@ -1114,8 +1125,13 @@ function buildMealsForDay(events, data, macros, restDay){
   const fruitPool = likedList(data,"fruit");
   const meals = [];
   mealEvents.forEach((ev, i)=>{
-    const meal = composeMeal(ev.mealId, proteinPool, carbPool, vegPool, fruitPool, data, i);
-    meal.time = ev.time; meal.id = ev.mealId; meal.title = ev.title; meal.why = mealWhy(ev.mealId, restDay);
+    let meal;
+    if(familyDay){
+      meal = { items:[], totals:{kcal:0,p:0,c:0,f:0}, flexible:true };
+    } else {
+      meal = composeMeal(ev.mealId, proteinPool, carbPool, vegPool, fruitPool, data, i);
+    }
+    meal.time = ev.time; meal.id = ev.mealId; meal.title = ev.title; meal.why = mealWhy(ev.mealId, restDay, familyDay);
     meals.push(meal);
   });
   return meals;
@@ -1151,7 +1167,10 @@ function composeMeal(mealId, proteinPool, carbPool, vegPool, fruitPool, data, se
     totals
   };
 }
-function mealWhy(mealId, restDay){
+function mealWhy(mealId, restDay, familyDay){
+  if(familyDay){
+    return "Family day — a moderate diet break. Eat mindfully and enjoy the time together; no strict tracking today.";
+  }
   const map = {
     breakfast: "High-protein breakfast designed to support muscle retention while providing enough carbohydrates for your morning.",
     lunch: "Balanced plate to keep energy steady and hit your protein target for the day.",
@@ -1349,7 +1368,7 @@ function renderHome(){
   host.innerHTML = `
     <div class="hero-card">
       <div class="hero-date">${new Date().toLocaleDateString(undefined,{weekday:"long", month:"long", day:"numeric"})}</div>
-      <div class="hero-headline">${dayPlan.restDay ? "Rest day — recover well." : "Today's focus: "+ (dayPlan.workout? dayPlan.workout.label : "Training day")}</div>
+      <div class="hero-headline">${dayPlan.familyDay ? "👨‍👩‍👧 Family day — moderate diet break, no workout today." : (dayPlan.restDay ? "Rest day — recover well." : "Today's focus: "+ (dayPlan.workout? dayPlan.workout.label : "Training day"))}</div>
     </div>
 
     ${nextEvent ? `
@@ -1424,12 +1443,21 @@ function renderTimeline(events){
   </div>`;
 }
 function checklistItemsFor(dayPlan){
+  // Full day checkout — every actionable checkpoint from wake-up to sleep.
+  // Work/commute markers are automatic and excluded since there's nothing to check off.
   const items = [];
-  dayPlan.meals.forEach(m=> items.push({key:"meal_"+m.id, label:m.title, time:m.time}));
-  if(dayPlan.workout) items.push({key:"workout", label:"Workout — "+dayPlan.workout.label, time: dayPlan.workoutWindow?minToTime(dayPlan.workoutWindow[0]):null});
-  (App.data.supplements||[]).forEach(s=>{ if(s.name) items.push({key:"supp_"+s.id, label:s.name, time:null}); });
-  items.push({key:"water", label:"Water goal — "+App.data.routine.waterGoalL+"L", time:null});
-  items.push({key:"sleep", label:"Sleep goal", time:null});
+  dayPlan.events.forEach((ev,i)=>{
+    if(ev.type==="work" || ev.type==="commute") return;
+    let key;
+    if(ev.type==="meal") key = "meal_"+ev.mealId;
+    else if(ev.type==="workout") key = "workout";
+    else if(ev.type==="supplement") key = "supp_"+(ev.id||i);
+    else if(ev.type==="wake") key = "wake";
+    else if(ev.type==="water") key = "water";
+    else if(ev.type==="sleep") key = ev.title.toLowerCase().includes("wind") ? "winddown" : "sleep";
+    else key = "evt_"+i;
+    items.push({key, label: ev.type==="workout" ? "Workout — "+ev.title.replace(/^(Gym workout — |Home workout — )/,"") : ev.title, time: ev.time});
+  });
   return items;
 }
 function getChecklistForDate(dateStr){
@@ -1497,14 +1525,15 @@ function renderWeekPlanSummary(plan){
       const dp = plan.days[day];
       return `<div class="day-pill ${dp.restDay?"off":""}">
         <div class="dp-name">${DAY_SHORT[day]}</div>
-        <div class="dp-sub">${dp.restDay?"Rest":"Train"}</div>
+        <div class="dp-sub">${dp.familyDay?"Family":dp.restDay?"Rest":"Train"}</div>
       </div>`;
     }).join("")}
   </div>
   <div class="checklist">
     ${DAY_NAMES.map(day=>{
       const dp = plan.days[day];
-      return `<div class="list-row"><div class="list-row-label">${day}</div><div class="list-row-value">${dp.restDay?"Rest day":dp.workout.label} · ${dp.macros.calories} kcal</div></div>`;
+      const label = dp.familyDay ? "Family day — diet break" : (dp.restDay?"Rest day":dp.workout.label);
+      return `<div class="list-row"><div class="list-row-label">${day}</div><div class="list-row-value">${label} · ${dp.macros.calories} kcal</div></div>`;
     }).join("")}
   </div>`;
 }
@@ -1534,7 +1563,17 @@ function renderWorkout(){
         </div>`;
       }).join("")}
     </div>
-    ${dp.restDay ? `
+    ${dp.familyDay ? `
+      <div class="card">
+        <div class="card-title-row"><h3>Family day</h3><span class="tag accent">Diet break</span></div>
+        <p class="muted" style="font-size:13.5px; line-height:1.6; margin-bottom:10px;">No workout is scheduled today — enjoy the time with family. It's also a moderate diet break: eat mindfully without strict tracking, then pick your normal plan back up tomorrow.</p>
+        <ul style="margin:0; padding-left:18px; color:var(--text-dim); font-size:14px; line-height:2;">
+          <li>No training today — full recovery</li>
+          <li>Moderate, relaxed approach to meals</li>
+          <li>Stay reasonably hydrated</li>
+          <li>Back to your regular plan tomorrow</li>
+        </ul>
+      </div>` : dp.restDay ? `
       <div class="card">
         <div class="card-title-row"><h3>Rest day</h3><span class="tag accent">Recovery</span></div>
         <ul style="margin:0; padding-left:18px; color:var(--text-dim); font-size:14px; line-height:2;">
@@ -1564,8 +1603,9 @@ function renderWorkout(){
     <div class="card">
       <div class="card-title-row"><h3>Why this timing?</h3></div>
       <p class="muted" style="font-size:13.5px; line-height:1.6;">
-        ${dp.restDay ? `${day} is a scheduled recovery day based on your preferred training days — your muscles rebuild while you rest.` :
-        `Your workout is scheduled at ${fmt12(minToTime(dp.workoutWindow[0]))} because that's the best window around your work hours, commute, and sleep for ${day}.`}
+        ${dp.familyDay ? `You marked ${day} as a family day, so MuscleSync skipped training entirely and relaxed today's nutrition plan.` :
+        dp.restDay ? `${day} is a scheduled recovery day based on your preferred training days — your muscles rebuild while you rest.` :
+        `Your workout is scheduled at ${fmt12(minToTime(dp.workoutWindow[0]))} because that's the best window after your work hours, commute, and before sleep for ${day}.`}
       </p>
     </div>
   `;
@@ -1608,7 +1648,7 @@ function renderNutrition(){
       </div>
     </div>
 
-    <div class="card-title-row" style="margin-top:4px;"><h3 class="section-title" style="margin:0;">Meals</h3></div>
+    <div class="card-title-row" style="margin-top:4px;"><h3 class="section-title" style="margin:0;">Meals</h3>${dp.familyDay?`<span class="tag accent">Family day — flexible</span>`:""}</div>
     ${dp.meals.map((meal,i)=>`
       <div class="meal-card">
         <div class="meal-head">
@@ -1617,17 +1657,22 @@ function renderNutrition(){
           </div>
           <div class="meal-time">${fmt12(meal.time)}</div>
         </div>
-        <div class="meal-items">${meal.items.map(it=>`${esc(it.name)} — ${esc(it.serving)}`).join("<br>")}</div>
-        <div class="macro-pills">
-          <span class="macro-pill">${meal.totals.kcal} kcal</span>
-          <span class="macro-pill">P ${meal.totals.p}g</span>
-          <span class="macro-pill">C ${meal.totals.c}g</span>
-          <span class="macro-pill">F ${meal.totals.f}g</span>
-        </div>
+        ${meal.flexible ? `
+          <div class="meal-items faint">Flexible — no strict items assigned today.</div>
+        ` : `
+          <div class="meal-items">${meal.items.map(it=>`${esc(it.name)} — ${esc(it.serving)}`).join("<br>")}</div>
+          <div class="macro-pills">
+            <span class="macro-pill">${meal.totals.kcal} kcal</span>
+            <span class="macro-pill">P ${meal.totals.p}g</span>
+            <span class="macro-pill">C ${meal.totals.c}g</span>
+            <span class="macro-pill">F ${meal.totals.f}g</span>
+          </div>
+        `}
         <div class="meal-why">${esc(meal.why)}</div>
+        ${meal.flexible ? "" : `
         <div class="meal-actions">
           <button class="btn btn-ghost btn-sm" data-replace="${i}">Replace meal</button>
-        </div>
+        </div>`}
       </div>`).join("")}
 
     <div class="card">
@@ -1740,9 +1785,12 @@ function renderProgress(){
     </div>
 
     ${renderWeeklyReview()}
+    ${renderConsistencyCard()}
   `;
   document.getElementById("addWeightBtn").addEventListener("click", openLogWeightModal);
   if(sorted.length) drawWeightChart(sorted);
+  const trackedWeeks = trackedWeekKeys(8).map(wk=>weekAdherenceStats(wk)).filter(Boolean);
+  if(trackedWeeks.length) drawConsistencyChart(trackedWeeks);
 }
 function openLogWeightModal(){
   openModal(`
@@ -1781,30 +1829,103 @@ function drawWeightChart(sorted){
     ${pts.map(p=>`<circle cx="${p[0]}" cy="${p[1]}" r="3.5" fill="var(--accent)"/>`).join("")}
   </svg>`;
 }
-function renderWeeklyReview(){
-  const wk = currentWeekKey();
-  const plan = App.data.plans[wk];
-  if(!plan) return "";
-  const log = (App.data.progress||[]).filter(e=> e.date >= wk);
-  const weightChange = log.length>=2 ? round(log[log.length-1].weight - log[0].weight,1) : null;
-  const workoutsPlanned = Object.values(plan.days).filter(d=>!d.restDay).length;
-  const dateKeys = DAY_NAMES.map(d=> dateForDayInWeek(wk,d));
-  let doneItems=0, totalItems=0;
+/* ---- Consistency benchmark: turns the daily wake-to-sleep checklist into a
+   week-over-week score, so each finished week becomes one point on a running
+   benchmark that carries forward into the next week. ---- */
+function weekAdherenceStats(weekKey){
+  const plan = App.data.plans[weekKey];
+  if(!plan) return null;
+  const dateKeys = DAY_NAMES.map(d=> dateForDayInWeek(weekKey,d));
+  let doneItems=0, totalItems=0, workoutsPlanned=0, workoutsCompleted=0;
   dateKeys.forEach((dk,i)=>{
     const dp = plan.days[DAY_NAMES[i]];
     const items = checklistItemsFor(dp);
     const c = App.data.checklist[dk] || {};
     totalItems += items.length;
     doneItems += items.filter(it=>c[it.key]).length;
+    if(dp.workout){ workoutsPlanned++; if(c["workout"]) workoutsCompleted++; }
   });
-  const adherence = totalItems ? Math.round(doneItems/totalItems*100) : 0;
+  const pct = totalItems ? Math.round(doneItems/totalItems*100) : 0;
+  return { weekKey, pct, doneItems, totalItems, workoutsPlanned, workoutsCompleted };
+}
+function trackedWeekKeys(limit){
+  return Object.keys(App.data.plans).sort().slice(-(limit||8));
+}
+function currentDayStreak(){
+  let streak = 0;
+  let d = new Date();
+  for(let i=0;i<60;i++){
+    const dk = isoDate(d);
+    const wk = isoDate(getMonday(d));
+    const plan = App.data.plans[wk];
+    if(!plan){ break; }
+    const dayName = DAY_NAMES[(d.getDay()+6)%7];
+    const dp = plan.days[dayName];
+    const items = checklistItemsFor(dp);
+    if(!items.length){ break; }
+    const c = App.data.checklist[dk] || {};
+    const done = items.filter(it=>c[it.key]).length;
+    const pct = done/items.length*100;
+    if(i===0 && pct===0){ d.setDate(d.getDate()-1); continue; } // skip an untouched "today"
+    if(pct>=80) streak++; else break;
+    d.setDate(d.getDate()-1);
+  }
+  return streak;
+}
+function renderConsistencyCard(){
+  const weeks = trackedWeekKeys(8).map(wk=>weekAdherenceStats(wk)).filter(Boolean);
+  if(!weeks.length) return "";
+  const avg = Math.round(weeks.reduce((s,w)=>s+w.pct,0)/weeks.length);
+  const best = weeks.reduce((b,w)=> w.pct>b.pct?w:b, weeks[0]);
+  const streak = currentDayStreak();
+  const thisWeek = weeks[weeks.length-1];
+  return `
+    <div class="card">
+      <div class="card-title-row"><h3>Consistency benchmark</h3><span class="muted" style="font-size:12px;">Last ${weeks.length} week${weeks.length>1?"s":""}</span></div>
+      <div class="stat-grid">
+        ${statBox("🔥", streak+" day"+(streak===1?"":"s"), "Current streak")}
+        ${statBox("📈", avg+"%", "Average consistency")}
+        ${statBox("🏆", best.pct+"%", "Best week")}
+        ${statBox("✅", thisWeek.pct+"%", "This week")}
+      </div>
+      <div class="chart-wrap" id="consistencyChart" style="margin-top:14px;"></div>
+      <p class="muted" style="font-size:12.5px; margin-top:8px;">Each bar is one week's full wake-to-sleep checklist completion — every week you finish adds a new point to this benchmark.</p>
+    </div>`;
+}
+function drawConsistencyChart(weeks){
+  const el = document.getElementById("consistencyChart");
+  if(!el) return;
+  const w = Math.min(el.clientWidth || 320, 560), h = 130, pad = 22;
+  const barW = (w-pad*2)/weeks.length*0.6;
+  const gap = (w-pad*2)/weeks.length;
+  const bars = weeks.map((wkStat,i)=>{
+    const x = pad + i*gap + (gap-barW)/2;
+    const barH = (wkStat.pct/100)*(h-pad*2);
+    const y = h-pad-barH;
+    return {x, y, barW, barH, pct:wkStat.pct, label: new Date(wkStat.weekKey+"T00:00:00").toLocaleDateString(undefined,{month:"short",day:"numeric"})};
+  });
+  el.innerHTML = `<svg viewBox="0 0 ${w} ${h}" width="100%" height="${h}">
+    <line x1="${pad}" y1="${h-pad}" x2="${w-pad}" y2="${h-pad}" stroke="var(--border)" stroke-width="1"/>
+    ${bars.map(b=>`
+      <rect x="${b.x.toFixed(1)}" y="${b.y.toFixed(1)}" width="${b.barW.toFixed(1)}" height="${b.barH.toFixed(1)}" rx="4" fill="${b.pct>=70?"var(--accent)":b.pct>=40?"var(--warn)":"var(--danger)"}"/>
+      <text x="${(b.x+b.barW/2).toFixed(1)}" y="${h-6}" text-anchor="middle" font-size="9" fill="var(--text-faint)">${b.label}</text>
+    `).join("")}
+  </svg>`;
+}
+function renderWeeklyReview(){
+  const wk = currentWeekKey();
+  const stats = weekAdherenceStats(wk);
+  if(!stats) return "";
+  const log = (App.data.progress||[]).filter(e=> e.date >= wk);
+  const weightChange = log.length>=2 ? round(log[log.length-1].weight - log[0].weight,1) : null;
   return `
     <div class="card">
       <div class="card-title-row"><h3>Weekly report</h3></div>
       <div class="list-row"><div class="list-row-label">Weight change</div><div class="list-row-value">${weightChange!==null ? (weightChange<=0?"":"+")+weightChange+" kg" : "Log 2+ entries to see"}</div></div>
-      <div class="list-row"><div class="list-row-label">Workouts planned</div><div class="list-row-value">${workoutsPlanned} / ${workoutsPlanned}</div></div>
-      <div class="list-row"><div class="list-row-label">Plan adherence</div><div class="list-row-value">${adherence}%</div></div>
-      <p class="muted" style="font-size:13px; margin-top:10px;">${adherence>=70?"Strong week — keep this consistency going.":"Every checked box compounds. Small consistent steps beat perfect weeks."}</p>
+      <div class="list-row"><div class="list-row-label">Workouts completed</div><div class="list-row-value">${stats.workoutsCompleted} / ${stats.workoutsPlanned}</div></div>
+      <div class="list-row"><div class="list-row-label">Checklist items completed</div><div class="list-row-value">${stats.doneItems} / ${stats.totalItems}</div></div>
+      <div class="list-row"><div class="list-row-label">Plan adherence</div><div class="list-row-value">${stats.pct}%</div></div>
+      <p class="muted" style="font-size:13px; margin-top:10px;">${stats.pct>=70?"Strong week — keep this consistency going.":"Every checked box compounds. Small consistent steps beat perfect weeks."}</p>
     </div>`;
 }
 
@@ -2045,13 +2166,13 @@ function buildDemoProfile(){
   const wk = weekKeyFor(0);
   d.weeks[wk] = {
     days: {
-      Monday:{off:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
-      Tuesday:{off:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
-      Wednesday:{off:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
-      Thursday:{off:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
-      Friday:{off:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
+      Monday:{off:false, familyDay:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
+      Tuesday:{off:false, familyDay:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
+      Wednesday:{off:false, familyDay:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
+      Thursday:{off:false, familyDay:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
+      Friday:{off:false, familyDay:false, workStart:"08:00", workEnd:"16:00", commuteMin:20, wake:"06:30", sleep:"22:45"},
       Saturday:{off:true, workStart:"", workEnd:"", commuteMin:0, wake:"08:00", sleep:"23:30"},
-      Sunday:{off:true, workStart:"", workEnd:"", commuteMin:0, wake:"08:00", sleep:"22:30"},
+      Sunday:{off:true, familyDay:true, workStart:"", workEnd:"", commuteMin:0, wake:"08:00", sleep:"22:30"},
     }
   };
   d.progress = [

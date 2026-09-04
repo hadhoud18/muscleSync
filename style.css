@@ -170,7 +170,12 @@ a{color:inherit;}
 }
 .day-editor-head{display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;}
 .day-editor-head h4{font-size:15px;}
-.day-off-toggle{font-size:12px; color:var(--text-dim);}
+.day-off-toggle{display:block; font-size:12px; color:var(--text-dim); margin-bottom:10px;}
+.day-off-toggle input{margin-right:6px;}
+.day-off-toggle.family-toggle{
+  background:rgba(198,255,61,.06); border:1px solid rgba(198,255,61,.25);
+  border-radius:var(--radius-sm); padding:9px 10px; color:var(--text);
+}
 
 /* ==========================================================
    App shell
